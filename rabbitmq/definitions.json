@@ -1,0 +1,38 @@
+{
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "provisioning-ha",
+      "pattern": "^provisioning_queue$",
+      "apply-to": "queues",
+      "priority": 0,
+      "definition": {
+        "ha-mode": "exactly",
+        "ha-params": 2,
+        "ha-sync-mode": "automatic"
+      }
+    }
+  ],
+  "users": [
+    {
+      "name": "hosting",
+      "password_hash": "ZGVtb1lYCTfj9lDBTkpPVLdNAV67Vgpuccc+CSE1lycSKDVH",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": []
+    }
+  ],
+  "permissions": [
+    {
+      "user": "hosting",
+      "vhost": "/",
+      "configure": "^(orders|provisioning_queue)$",
+      "write": "^(orders|provisioning_queue)$",
+      "read": "^(orders|provisioning_queue)$"
+    }
+  ]
+}

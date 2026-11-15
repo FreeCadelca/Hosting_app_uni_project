@@ -1,0 +1,232 @@
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/frontend:/usr/share/nginx/html:ro
+    depends_on:
+      auth-service:
+        condition: service_started
+        restart: true
+      product-service:
+        condition: service_started
+        restart: true
+      payment-service:
+        condition: service_started
+        restart: true
+      management-service:
+        condition: service_started
+        restart: true
+    networks:
+      - frontend-net
+      - backend-net
+    restart: unless-stopped
+
+  auth-service:
+    build: ./services/auth
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@${DB_HOST:-pg-master}:5432/hosting
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=super-secret-jwt-key-for-hosting-service
+    depends_on:
+      pg-master:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend-net
+      - data-net
+    restart: unless-stopped
+
+  product-service:
+    build: ./services/product
+    ports:
+      - "8002:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@${DB_HOST:-pg-master}:5432/hosting
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=super-secret-jwt-key-for-hosting-service
+    depends_on:
+      pg-master:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend-net
+      - data-net
+    restart: unless-stopped
+
+  payment-service:
+    build: ./services/payment
+    ports:
+      - "8003:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@${DB_HOST:-pg-master}:5432/hosting
+      - RABBITMQ_URLS=amqp://hosting:hosting_demo@rabbitmq-1:5672/,amqp://hosting:hosting_demo@rabbitmq-2:5672/
+      - JWT_SECRET=super-secret-jwt-key-for-hosting-service
+    depends_on:
+      pg-master:
+        condition: service_healthy
+      rabbitmq-1:
+        condition: service_healthy
+    networks:
+      - backend-net
+      - data-net
+    restart: unless-stopped
+
+  provisioning-service:
+    build: ./services/provisioning
+    ports:
+      - "8004:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@${DB_HOST:-pg-master}:5432/hosting
+      - RABBITMQ_URLS=amqp://hosting:hosting_demo@rabbitmq-1:5672/,amqp://hosting:hosting_demo@rabbitmq-2:5672/
+    depends_on:
+      pg-master:
+        condition: service_healthy
+      rabbitmq-1:
+        condition: service_healthy
+    networks:
+      - backend-net
+      - data-net
+    restart: unless-stopped
+
+  management-service:
+    build: ./services/management
+    ports:
+      - "8005:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@${DB_HOST:-pg-master}:5432/hosting
+      - JWT_SECRET=super-secret-jwt-key-for-hosting-service
+    depends_on:
+      pg-master:
+        condition: service_healthy
+    networks:
+      - backend-net
+      - data-net
+    restart: unless-stopped
+
+  pg-master:
+    image: postgres:16-alpine
+    container_name: pg-master
+    environment:
+      - POSTGRES_DB=hosting
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - pg_master_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./db/master/init-replication.sh:/docker-entrypoint-initdb.d/02-init-replication.sh:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_senders=3"
+      - "-c"
+      - "wal_keep_size=64"
+      - "-c"
+      - "hot_standby=on"
+      - "-c"
+      - "listen_addresses=*"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - data-net
+    restart: unless-stopped
+
+  pg-standby:
+    image: postgres:16-alpine
+    container_name: pg-standby
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - PGDATA=${STANDBY_PGDATA:-/var/lib/postgresql/data}
+    volumes:
+      - pg_standby_data:/var/lib/postgresql/data
+      - ./db/standby/setup-standby.sh:/setup-standby.sh:ro
+    entrypoint: /bin/sh
+    command: ["/setup-standby.sh"]
+    depends_on:
+      pg-master:
+        condition: service_healthy
+    networks:
+      - data-net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - data-net
+    restart: unless-stopped
+
+  rabbitmq-1:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq-1
+    hostname: rabbitmq-1
+    environment:
+      - RABBITMQ_DEFAULT_USER=hosting
+      - RABBITMQ_DEFAULT_PASS=hosting_demo
+      - RABBITMQ_ERLANG_COOKIE=hosting-service-cookie
+    volumes:
+      - rabbitmq_1_data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - data-net
+    restart: unless-stopped
+
+  rabbitmq-2:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq-2
+    hostname: rabbitmq-2
+    environment:
+      - RABBITMQ_DEFAULT_USER=hosting
+      - RABBITMQ_DEFAULT_PASS=hosting_demo
+      - RABBITMQ_ERLANG_COOKIE=hosting-service-cookie
+    volumes:
+      - rabbitmq_2_data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq-2.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    depends_on:
+      rabbitmq-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - data-net
+    restart: unless-stopped
+
+networks:
+  frontend-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
+  data-net:
+    driver: bridge
+    internal: true
+
+volumes:
+  pg_master_data:
+  pg_standby_data:
+  rabbitmq_1_data:
+  rabbitmq_2_data:
